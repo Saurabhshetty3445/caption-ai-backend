@@ -4,11 +4,10 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-import whisper
 import ffmpeg
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from faster_whisper import WhisperModel
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -32,22 +31,21 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── Whisper model (loaded once at startup) ────────────────────
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "base")
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+# ── faster-whisper model (loaded once at startup) ─────────────
+MODEL_SIZE     = os.getenv("WHISPER_MODEL", "base")
+MAX_UPLOAD_MB  = int(os.getenv("MAX_UPLOAD_MB", "500"))
 
-print(f"[startup] Loading Whisper model: {MODEL_SIZE}")
-model = whisper.load_model(MODEL_SIZE)
-print("[startup] Whisper model ready.")
+print(f"[startup] Loading faster-whisper model: {MODEL_SIZE}")
+model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+print("[startup] Model ready.")
 
-ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".ogg"}
-VIDEO_EXTENSIONS   = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+ALLOWED_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".ogg"}
+VIDEO_EXT   = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
 
 # ── Helpers ───────────────────────────────────────────────────
 
 def fmt_ts(seconds: float) -> str:
-    """Seconds → SRT timestamp  HH:MM:SS,mmm"""
     ms = int((seconds % 1) * 1000)
     s  = int(seconds) % 60
     m  = (int(seconds) // 60) % 60
@@ -55,10 +53,10 @@ def fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def to_srt(segments: list) -> str:
+def to_srt(segments) -> str:
     lines = []
     for i, seg in enumerate(segments, 1):
-        lines.append(f"{i}\n{fmt_ts(seg['start'])} --> {fmt_ts(seg['end'])}\n{seg['text'].strip()}\n")
+        lines.append(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{seg.text.strip()}\n")
     return "\n".join(lines)
 
 
@@ -71,17 +69,20 @@ def extract_audio(src: str, dst: str) -> None:
     )
 
 
-def persist(job_id: str, filename: str, transcript: str, srt: str, language: str, duration: float) -> None:
-    supabase.table("transcriptions").upsert({
-        "id": job_id,
-        "filename": filename,
-        "transcript": transcript,
-        "srt_captions": srt,
-        "language": language,
-        "duration_seconds": round(duration, 2),
-        "created_at": datetime.utcnow().isoformat(),
-        "status": "completed",
-    }).execute()
+def persist(job_id, filename, transcript, srt, language, duration):
+    try:
+        supabase.table("transcriptions").upsert({
+            "id": job_id,
+            "filename": filename,
+            "transcript": transcript,
+            "srt_captions": srt,
+            "language": language,
+            "duration_seconds": round(duration, 2),
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "completed",
+        }).execute()
+    except Exception as e:
+        print(f"[warn] Supabase write failed: {e}")
 
 
 # ── Schema ────────────────────────────────────────────────────
@@ -107,53 +108,48 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL_SIZE, "model_loaded": model is not None}
+    return {"status": "ok", "model": MODEL_SIZE}
 
 
 @app.post("/transcribe", response_model=JobStatus)
-async def transcribe(request: Request, file: UploadFile = File(...)):
-    # File type check
+async def transcribe(file: UploadFile = File(...)):
     ext = Path(file.filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(400, f"Unsupported file type '{ext}'")
 
-    # Read file into memory with size guard
     content = await file.read()
     size_mb = len(content) / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
-        raise HTTPException(413, f"File too large ({size_mb:.1f} MB). Max allowed: {MAX_UPLOAD_MB} MB")
+        raise HTTPException(413, f"File too large ({size_mb:.1f} MB). Max: {MAX_UPLOAD_MB} MB")
 
     job_id = str(uuid.uuid4())
 
     with tempfile.TemporaryDirectory() as tmp:
-        video_path = os.path.join(tmp, f"input{ext}")
-        with open(video_path, "wb") as f:
+        input_path = os.path.join(tmp, f"input{ext}")
+        with open(input_path, "wb") as f:
             f.write(content)
 
-        # Extract audio from video formats
-        if ext in VIDEO_EXTENSIONS:
+        # Extract audio from video
+        if ext in VIDEO_EXT:
             audio_path = os.path.join(tmp, "audio.wav")
             try:
-                extract_audio(video_path, audio_path)
+                extract_audio(input_path, audio_path)
             except ffmpeg.Error as e:
-                raise HTTPException(422, f"Could not extract audio: {e.stderr.decode()}")
+                raise HTTPException(422, f"Audio extraction failed: {e.stderr.decode()}")
         else:
-            audio_path = video_path
+            audio_path = input_path
 
-        # Transcribe
-        result   = model.transcribe(audio_path, verbose=False)
-        segments = result["segments"]
-        transcript = result["text"].strip()
-        language   = result.get("language", "unknown")
-        duration   = segments[-1]["end"] if segments else 0.0
-        srt        = to_srt(segments)
+        # Transcribe with faster-whisper
+        # segments is a generator — consume it fully before tmp dir closes
+        segments_gen, info = model.transcribe(audio_path, beam_size=5)
+        segments = list(segments_gen)
 
-        # Persist to Supabase (sync call — supabase-py is not async)
-        try:
-            persist(job_id, file.filename, transcript, srt, language, duration)
-        except Exception as e:
-            # Don't fail the request if DB write fails — still return result
-            print(f"[warn] Supabase write failed: {e}")
+        language = info.language
+        duration = info.duration
+        transcript = " ".join(seg.text.strip() for seg in segments)
+        srt = to_srt(segments)
+
+        persist(job_id, file.filename, transcript, srt, language, duration)
 
     return JobStatus(
         job_id=job_id,
