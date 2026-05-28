@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# System deps: ffmpeg for audio extraction, git for whisper model download
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -9,7 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install CPU-only PyTorch first (saves ~800 MB vs default CUDA build)
+# Fix: upgrade pip and install setuptools before anything else
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install CPU-only PyTorch (saves ~800 MB vs CUDA build)
 RUN pip install --no-cache-dir \
     torch==2.2.2+cpu \
     torchaudio==2.2.2+cpu \
@@ -20,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pre-download the Whisper model at build time so first request is instant
+# Pre-download Whisper model at build time so first request is instant
 ARG WHISPER_MODEL=base
 RUN python -c "import whisper; whisper.load_model('${WHISPER_MODEL}')"
 
