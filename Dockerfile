@@ -8,21 +8,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Fix: upgrade pip and install setuptools before anything else
+# Upgrade pip + install setuptools/wheel into the GLOBAL env first
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install CPU-only PyTorch (saves ~800 MB vs CUDA build)
+# Install CPU-only PyTorch
 RUN pip install --no-cache-dir \
     torch==2.2.2+cpu \
     torchaudio==2.2.2+cpu \
     --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# PIP_NO_BUILD_ISOLATION=0 makes openai-whisper reuse the global env
+# (where setuptools/pkg_resources is already installed) instead of
+# spinning up a fresh isolated subprocess that lacks pkg_resources
+RUN PIP_NO_BUILD_ISOLATION=0 pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pre-download Whisper model at build time so first request is instant
 ARG WHISPER_MODEL=base
 RUN python -c "import whisper; whisper.load_model('${WHISPER_MODEL}')"
 
