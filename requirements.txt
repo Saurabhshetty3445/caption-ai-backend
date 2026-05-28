@@ -3,8 +3,9 @@ fastapi==0.111.0
 uvicorn[standard]==0.30.1
 python-multipart==0.0.9
 
-# faster-whisper: pre-built wheels, no source build needed, faster + less RAM than openai-whisper
+# Whisper
 faster-whisper==1.0.3
+requests
 
 # Audio/video
 ffmpeg-python==0.2.0
