@@ -1,13 +1,12 @@
-# Must come first — openai-whisper build requires pkg_resources
-setuptools>=68.0.0
-
 # Web framework
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
 python-multipart==0.0.9
 
-# Whisper (torch installed separately in Dockerfile for CPU-only build)
-openai-whisper==20231117
+# faster-whisper: pre-built wheels, no source build needed, faster + less RAM than openai-whisper
+faster-whisper==1.0.3
+
+# Audio/video
 ffmpeg-python==0.2.0
 
 # Supabase
