@@ -1,3 +1,6 @@
+# Must come first — openai-whisper build requires pkg_resources
+setuptools>=68.0.0
+
 # Web framework
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
