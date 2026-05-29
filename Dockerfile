@@ -8,17 +8,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# faster-whisper uses ctranslate2 (CPU wheels, no torch needed)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pre-download the Whisper model at build time
 ARG WHISPER_MODEL=base
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')"
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Shell form (not JSON array) so $PORT is expanded by the shell
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
