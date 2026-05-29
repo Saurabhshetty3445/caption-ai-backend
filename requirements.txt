@@ -10,6 +10,9 @@ requests
 # Audio/video
 ffmpeg-python==0.2.0
 
+# Gemini
+google-generativeai==0.8.3
+
 # Supabase
 supabase==2.4.6
 
